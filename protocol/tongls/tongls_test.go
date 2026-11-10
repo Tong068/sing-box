@@ -224,9 +224,7 @@ func startOrdinaryInbound(t testing.TB, router *privateTestRouter, credentials p
 	var mutex sync.Mutex
 	active := make(map[net.Conn]struct{})
 	var workers sync.WaitGroup
-	workers.Add(1)
-	go func() {
-		defer workers.Done()
+	workers.Go(func() {
 		for {
 			conn, err := listener.Accept()
 			if err != nil {
@@ -238,9 +236,7 @@ func startOrdinaryInbound(t testing.TB, router *privateTestRouter, credentials p
 			mutex.Lock()
 			active[conn] = struct{}{}
 			mutex.Unlock()
-			workers.Add(1)
-			go func() {
-				defer workers.Done()
+			workers.Go(func() {
 				defer func() {
 					mutex.Lock()
 					delete(active, conn)
@@ -250,9 +246,9 @@ func startOrdinaryInbound(t testing.TB, router *privateTestRouter, credentials p
 				instance.(adapter.ConnectionHandler).NewConnection(ctx, conn, adapter.InboundContext{
 					Source: M.SocksaddrFromNet(conn.RemoteAddr()),
 				}, nil)
-			}()
+			})
 		}
-	}()
+	})
 	t.Cleanup(func() {
 		cancel()
 		listener.Close()
@@ -338,7 +334,7 @@ func TestTonglsRoundTripAndReuse(t *testing.T) {
 	router := privateEchoRouter()
 	server := startPrivateInbound(t, router, privateInboundOptions(credentials, "127.0.0.1:1"))
 	client, _ := startPrivateOutbound(t, privateOutboundOptions(credentials, server.address))
-	for index := 0; index < 4; index++ {
+	for index := range 4 {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		conn, err := client.DialContext(ctx, "tcp", M.ParseSocksaddr("example.org:443"))
 		cancel()

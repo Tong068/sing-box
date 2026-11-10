@@ -361,7 +361,7 @@ func decodeAuthorization(value string) ([authSize]byte, bool) {
 
 func hasToken(values []string, token string) bool {
 	for _, value := range values {
-		for _, part := range strings.Split(value, ",") {
+		for part := range strings.SplitSeq(value, ",") {
 			if strings.EqualFold(strings.TrimSpace(part), token) {
 				return true
 			}

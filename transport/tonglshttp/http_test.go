@@ -402,7 +402,7 @@ func TestValidationAndPadding(t *testing.T) {
 			t.Errorf("accepted padding bounds %v", pair)
 		}
 	}
-	for index := 0; index < 100; index++ {
+	for range 100 {
 		padding, err := randomPadding(16, 32)
 		if err != nil || len(padding) < 16 || len(padding) > 32 || strings.ContainsAny(padding, " \r\n\t") {
 			t.Fatalf("invalid padding %q: %v", padding, err)
@@ -482,11 +482,12 @@ func BenchmarkAuthenticate(b *testing.B) {
 				request.Header.Set("Connection", "Upgrade")
 				request.Header.Set("Upgrade", Protocol)
 				authorization := encodeAuthorization(key, proof)
-				if kind == "known_bad" {
+				switch kind {
+				case "known_bad":
 					bad := proof
 					bad[0] ^= 1
 					authorization = encodeAuthorization(key, bad)
-				} else if kind == "unknown" {
+				case "unknown":
 					unknown := sha256.Sum256([]byte("unknown benchmark credential"))
 					authorization = encodeAuthorization(unknown, makeProof(unknown, exported, http.MethodGet, "website.test", "/private"))
 				}

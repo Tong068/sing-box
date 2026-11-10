@@ -42,10 +42,10 @@ type privateInbound struct {
 
 func newPrivateInbound(ctx context.Context, owner *Inbound, options option.TonglsInboundOptions, users []option.TonglsUser) (*privateInbound, error) {
 	if options.Fallback == nil || !options.Fallback.Build().IsValid() || options.Fallback.ServerPort == 0 {
-		return nil, fmt.Errorf("Tongls requires a fixed plaintext HTTP fallback server and port")
+		return nil, fmt.Errorf("tongls requires a fixed plaintext HTTP fallback server and port")
 	}
 	if len(users) == 0 || len(users) > 1024 {
-		return nil, fmt.Errorf("Tongls requires between 1 and 1024 users")
+		return nil, fmt.Errorf("tongls requires between 1 and 1024 users")
 	}
 	handshake, err := privateDuration(options.HandshakeTimeout.Build(), 10*time.Second)
 	if err != nil {
@@ -60,7 +60,7 @@ func newPrivateInbound(ctx context.Context, owner *Inbound, options option.Tongl
 		limit = 1024
 	}
 	if limit < 1 || limit > 65536 {
-		return nil, fmt.Errorf("Tongls max_connections must be between 1 and 65536")
+		return nil, fmt.Errorf("tongls max_connections must be between 1 and 65536")
 	}
 	p := &privateInbound{ctx: ctx, owner: owner, handshake: handshake, idle: idle, limit: limit, active: make(map[*privateConn]struct{})}
 	fallbackURL := &url.URL{Scheme: "http", Host: options.Fallback.Build().String()}

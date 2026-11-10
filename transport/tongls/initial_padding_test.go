@@ -238,12 +238,10 @@ func TestUpstreamInteroperability(t *testing.T) {
 				deadline, _ := ctx.Deadline()
 				clientConn.SetDeadline(deadline)
 				serverConn.SetDeadline(deadline)
-				workers.Add(1)
-				go func() {
-					defer workers.Done()
+				workers.Go(func() {
 					defer serverConn.Close()
 					_ = serve(ctx, serverConn, M.ParseSocksaddr("127.0.0.1:12345"), nil)
-				}()
+				})
 				return clientConn, nil
 			}
 			var client interopClient
