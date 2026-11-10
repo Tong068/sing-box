@@ -8,7 +8,6 @@ import (
 	"github.com/sagernet/sing-box/adapter"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/dns"
-	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/buf"
 	"github.com/sagernet/sing/common/bufio"
 	"github.com/sagernet/sing/common/canceler"
@@ -55,7 +54,9 @@ func writeStreamResponse(conn net.Conn, response *mDNS.Msg) {
 	responseBuffer := buf.NewSize(3 + responseLength)
 	defer responseBuffer.Release()
 	responseBuffer.Resize(2, 0)
-	n, err := response.PackBuffer(responseBuffer.FreeBytes())
+	compressedResponse := *response
+	compressedResponse.Compress = true
+	n, err := compressedResponse.PackBuffer(responseBuffer.FreeBytes())
 	if err != nil {
 		return
 	}
@@ -70,7 +71,6 @@ func NewDNSPacketConnection(ctx context.Context, router adapter.DNSRouter, conn 
 	rearHeadroom := N.CalculateRearHeadroom(conn)
 	var reader N.PacketReader = conn
 	var counters []N.CountFunc
-	cachedPackets = common.Reverse(cachedPackets)
 	for {
 		reader, counters = N.UnwrapCountPacketReader(reader, counters)
 		if cachedReader, isCached := reader.(N.CachedPacketReader); isCached {

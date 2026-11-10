@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -44,6 +45,7 @@ import (
 	"github.com/sagernet/tailscale/ipn"
 	"github.com/sagernet/tailscale/ipn/ipnlocal"
 	tsDNS "github.com/sagernet/tailscale/net/dns"
+	nDNSResolver "github.com/sagernet/tailscale/net/dns/resolver"
 	"github.com/sagernet/tailscale/net/tsaddr"
 	tsTUN "github.com/sagernet/tailscale/net/tstun"
 	"github.com/sagernet/tailscale/tailcfg"
@@ -60,6 +62,7 @@ var (
 	_ adapter.OutboundWithPreferredRoutes = (*Endpoint)(nil)
 	_ adapter.InterfaceUpdateListener     = (*Endpoint)(nil)
 	_ adapter.Referrer                    = (*Endpoint)(nil)
+	_ adapter.OutboundWithMultiplex       = (*Endpoint)(nil)
 	_ adapter.OnDemandEndpoint            = (*Endpoint)(nil)
 	_ dialer.PacketDialerWithDestination  = (*Endpoint)(nil)
 	_ tun.Port                            = (*Endpoint)(nil)
@@ -83,6 +86,7 @@ type Endpoint struct {
 	network           adapter.NetworkManager
 	platformInterface adapter.PlatformInterface
 	detour            string
+	binding           systemBinding
 	server            *tsnet.Server
 	stack             *tun.Go
 	returnAccess      sync.Mutex
@@ -91,12 +95,10 @@ type Endpoint struct {
 	onReconfigHook    wgengine.ReconfigListener
 	sshReconfigHook   wgengine.ReconfigListener
 
-	cfg           *wgcfg.Config
-	routerCfg     *router.Config
-	dnsCfg        *tsDNS.Config
-	routeDomains  common.TypedValue[map[string]bool]
-	routeSuffixes common.TypedValue[[]string]
-	searchDomains atomic.Bool
+	cfg       *wgcfg.Config
+	routerCfg *router.Config
+	dnsCfg    *tsDNS.Config
+	domains   atomic.Pointer[tailnetDomains]
 
 	acceptRoutes               bool
 	exitNode                   string
@@ -275,8 +277,10 @@ func (t *Endpoint) start(scope *adapter.Scope) error {
 	if err != nil {
 		return err
 	}
+	t.binding = binding
 	t.server.ControlFunc = binding.control
 	t.server.ListenPacketFunc = binding.listenPacket
+	t.server.DefaultRouteFunc = binding.defaultRoute
 	if t.systemInterface {
 		mtu := t.systemInterfaceMTU
 		if mtu == 0 {
@@ -330,6 +334,11 @@ func (t *Endpoint) postStart(scope *adapter.Scope) error {
 		return err
 	}
 	scope.Add(t.server.Close)
+	unwatch := t.binding.watch(t.server.Sys().NetMon.Get())
+	scope.Add(func() error {
+		unwatch()
+		return nil
+	})
 	localBackend := t.server.ExportLocalBackend()
 	t.localBackend.Store(localBackend)
 	scope.Add(func() error {
@@ -590,6 +599,10 @@ func (t *Endpoint) Logout(ctx context.Context) error {
 		return E.Cause(err, "start interactive login")
 	}
 	return nil
+}
+
+func (t *Endpoint) MultiplexEnabled() bool {
+	return true
 }
 
 func (t *Endpoint) InterfaceUpdated(ctx context.Context) {
@@ -902,26 +915,19 @@ func (t *Endpoint) NewPacketConnectionEx(_ context.Context, conn N.PacketConn, s
 }
 
 func (t *Endpoint) PreferredDomain(metadata *adapter.InboundContext, domain string) bool {
-	routeDomains := t.routeDomains.Load()
-	if routeDomains == nil {
+	domains := t.domains.Load()
+	if domains == nil {
 		return false
 	}
-	domain = strings.ToLower(domain)
-	if routeDomains[domain] {
+	canonicalDomain := mDNS.CanonicalName(domain)
+	if slices.Contains(domains.searchDomains, canonicalDomain) {
 		return true
 	}
+	var magicHosts nDNSResolver.MagicDNSHosts
 	if t.started.Load() {
-		magicHosts := t.server.ExportLocalBackend().ExportMagicDNSHosts()
-		if _, found := lookupHosts(nil, magicHosts, domain); found {
-			return true
-		}
+		magicHosts = t.server.ExportLocalBackend().ExportMagicDNSHosts()
 	}
-	for _, suffix := range t.routeSuffixes.Load() {
-		if matchDomainSuffix(domain, suffix) {
-			return true
-		}
-	}
-	return !strings.Contains(domain, ".") && t.searchDomains.Load()
+	return domains.match(magicHosts, canonicalDomain, !strings.Contains(domain, "."))
 }
 
 func (t *Endpoint) PreferredAddress(metadata *adapter.InboundContext, address netip.Addr) bool {
@@ -955,20 +961,8 @@ func (t *Endpoint) onReconfig(cfg *wgcfg.Config, routerCfg *router.Config, dnsCf
 	t.routerCfg = routerCfg
 	t.dnsCfg = dnsCfg
 
-	routeDomains := make(map[string]bool)
-	for fqdn := range dnsCfg.Hosts {
-		routeDomains[fqdn.WithoutTrailingDot()] = true
-	}
-	for _, fqdn := range dnsCfg.SearchDomains {
-		routeDomains[fqdn.WithoutTrailingDot()] = true
-	}
-	routeSuffixes := make([]string, 0, len(dnsCfg.Routes))
-	for fqdn := range dnsCfg.Routes {
-		routeSuffixes = append(routeSuffixes, strings.ToLower(fqdn.WithoutTrailingDot()))
-	}
-	t.routeDomains.Store(routeDomains)
-	t.routeSuffixes.Store(routeSuffixes)
-	t.searchDomains.Store(len(dnsCfg.SearchDomains) > 0)
+	domains := newTailnetDomains(dnsCfg)
+	t.domains.Store(&domains)
 
 	if t.onReconfigHook != nil {
 		t.onReconfigHook(cfg, routerCfg, dnsCfg)
@@ -1040,5 +1034,7 @@ func (t *peerDNSQueryHandler) HandlePeerDNSQuery(ctx context.Context, query []by
 		}
 		return nil, err
 	}
-	return response.Pack()
+	compressedResponse := *response
+	compressedResponse.Compress = true
+	return compressedResponse.Pack()
 }

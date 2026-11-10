@@ -34,6 +34,7 @@ import (
 var (
 	_ adapter.Outbound                   = (*TailcatOutbound)(nil)
 	_ adapter.IdleConnectionKeeper       = (*TailcatOutbound)(nil)
+	_ adapter.OutboundWithMultiplex      = (*TailcatOutbound)(nil)
 	_ adapter.InterfaceUpdateListener    = (*TailcatOutbound)(nil)
 	_ dialer.PacketDialerWithDestination = (*TailcatOutbound)(nil)
 )
@@ -154,11 +155,12 @@ func (o *TailcatOutbound) acquire(ctx context.Context) (*tailcatNode, func(), er
 		return nil, nil, err
 	}
 	o.active++
+	keepSession := adapter.KeepSessionFromContext(ctx)
 	return node, sync.OnceFunc(func() {
 		o.access.Lock()
 		defer o.access.Unlock()
 		o.active--
-		if o.active == 0 && o.idle {
+		if o.active == 0 && o.idle && !keepSession {
 			o.closeNodeLocked()
 		}
 	}), nil
@@ -183,7 +185,8 @@ func (o *TailcatOutbound) ensureLocked(ctx context.Context) (*tailcatNode, error
 		PrivateKey:   o.privateKey,
 		PresharedKey: o.presharedKey,
 		Region:       region,
-		Hooks:        binding.hooks(o.dialer),
+		Dialer:       o.dialer,
+		Binding:      binding,
 		LookupHook: func(ctx context.Context, host string) ([]netip.Addr, error) {
 			return o.dnsRouter.Lookup(ctx, host, o.queryOptions)
 		},
@@ -207,6 +210,10 @@ func (o *TailcatOutbound) ensureLocked(ctx context.Context) (*tailcatNode, error
 	o.logger.Info("connected to server")
 	o.node = node
 	return node, nil
+}
+
+func (o *TailcatOutbound) MultiplexEnabled() bool {
+	return true
 }
 
 func (o *TailcatOutbound) SetKeepIdleConnections(keep bool) {

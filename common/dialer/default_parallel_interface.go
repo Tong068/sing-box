@@ -3,6 +3,8 @@ package dialer
 import (
 	"context"
 	"net"
+	"strconv"
+	"syscall"
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
@@ -10,10 +12,11 @@ import (
 	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/control"
 	E "github.com/sagernet/sing/common/exceptions"
+	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
 )
 
-func (d *DefaultDialer) dialParallelInterface(ctx context.Context, dialer net.Dialer, network string, addr string, strategy C.NetworkStrategy, interfaceType []C.InterfaceType, fallbackInterfaceType []C.InterfaceType, fallbackDelay time.Duration) (net.Conn, bool, error) {
+func (d *DefaultDialer) dialParallelInterface(ctx context.Context, dialer net.Dialer, network string, destination M.Socksaddr, strategy C.NetworkStrategy, interfaceType []C.InterfaceType, fallbackInterfaceType []C.InterfaceType, fallbackDelay time.Duration) (net.Conn, bool, error) {
 	primaryInterfaces, fallbackInterfaces := selectInterfaces(d.networkManager, strategy, interfaceType, fallbackInterfaceType)
 	if len(primaryInterfaces)+len(fallbackInterfaces) == 0 {
 		return nil, false, E.New("no available network interface")
@@ -30,13 +33,9 @@ func (d *DefaultDialer) dialParallelInterface(ctx context.Context, dialer net.Di
 		} else {
 			iif = fallbackInterfaces[0]
 		}
-		perNetDialer := dialer
-		if defaultInterface == nil || iif.Index != defaultInterface.Index {
-			perNetDialer.Control = control.Append(perNetDialer.Control, control.BindToInterface(nil, iif.Name, iif.Index))
-		}
-		conn, err := perNetDialer.DialContext(ctx, network, addr)
+		conn, err := dialInterface(ctx, dialer, network, destination, iif, defaultInterface)
 		if err != nil {
-			return nil, false, E.Cause(err, "dial ", iif.Name, " (", iif.Index, ")")
+			return nil, false, err
 		}
 		return conn, primary, nil
 	}
@@ -52,14 +51,10 @@ func (d *DefaultDialer) dialParallelInterface(ctx context.Context, dialer net.Di
 	}
 	results := make(chan dialResult) // unbuffered
 	startRacer := func(ctx context.Context, primary bool, iif adapter.NetworkInterface) {
-		perNetDialer := dialer
-		if defaultInterface == nil || iif.Index != defaultInterface.Index {
-			perNetDialer.Control = control.Append(perNetDialer.Control, control.BindToInterface(nil, iif.Name, iif.Index))
-		}
-		conn, err := perNetDialer.DialContext(ctx, network, addr)
+		conn, err := dialInterface(ctx, dialer, network, destination, iif, defaultInterface)
 		if err != nil {
 			select {
-			case results <- dialResult{error: E.Cause(err, "dial ", iif.Name, " (", iif.Index, ")"), primary: primary}:
+			case results <- dialResult{error: err, primary: primary}:
 			case <-returned:
 			}
 		} else {
@@ -108,7 +103,7 @@ func (d *DefaultDialer) dialParallelInterface(ctx context.Context, dialer net.Di
 	}
 }
 
-func (d *DefaultDialer) dialParallelInterfaceFastFallback(ctx context.Context, dialer net.Dialer, network string, addr string, strategy C.NetworkStrategy, interfaceType []C.InterfaceType, fallbackInterfaceType []C.InterfaceType, fallbackDelay time.Duration, resetFastFallback func(time.Time)) (net.Conn, bool, error) {
+func (d *DefaultDialer) dialParallelInterfaceFastFallback(ctx context.Context, dialer net.Dialer, network string, destination M.Socksaddr, strategy C.NetworkStrategy, interfaceType []C.InterfaceType, fallbackInterfaceType []C.InterfaceType, fallbackDelay time.Duration, resetFastFallback func(time.Time)) (net.Conn, bool, error) {
 	primaryInterfaces, fallbackInterfaces := selectInterfaces(d.networkManager, strategy, interfaceType, fallbackInterfaceType)
 	if len(primaryInterfaces)+len(fallbackInterfaces) == 0 {
 		return nil, false, E.New("no available network interface")
@@ -125,13 +120,9 @@ func (d *DefaultDialer) dialParallelInterfaceFastFallback(ctx context.Context, d
 		} else {
 			iif = fallbackInterfaces[0]
 		}
-		perNetDialer := dialer
-		if defaultInterface == nil || iif.Index != defaultInterface.Index {
-			perNetDialer.Control = control.Append(perNetDialer.Control, control.BindToInterface(nil, iif.Name, iif.Index))
-		}
-		conn, err := perNetDialer.DialContext(ctx, network, addr)
+		conn, err := dialInterface(ctx, dialer, network, destination, iif, defaultInterface)
 		if err != nil {
-			return nil, false, E.Cause(err, "dial ", iif.Name, " (", iif.Index, ")")
+			return nil, false, err
 		}
 		return conn, primary, nil
 	}
@@ -148,14 +139,10 @@ func (d *DefaultDialer) dialParallelInterfaceFastFallback(ctx context.Context, d
 	startAt := time.Now()
 	results := make(chan dialResult) // unbuffered
 	startRacer := func(ctx context.Context, primary bool, iif adapter.NetworkInterface) {
-		perNetDialer := dialer
-		if defaultInterface == nil || iif.Index != defaultInterface.Index {
-			perNetDialer.Control = control.Append(perNetDialer.Control, control.BindToInterface(nil, iif.Name, iif.Index))
-		}
-		conn, err := perNetDialer.DialContext(ctx, network, addr)
+		conn, err := dialInterface(ctx, dialer, network, destination, iif, defaultInterface)
 		if err != nil {
 			select {
-			case results <- dialResult{error: E.Cause(err, "dial ", iif.Name, " (", iif.Index, ")"), primary: primary}:
+			case results <- dialResult{error: err, primary: primary}:
 			case <-returned:
 			}
 		} else {
@@ -190,36 +177,42 @@ func (d *DefaultDialer) dialParallelInterfaceFastFallback(ctx context.Context, d
 	return nil, false, E.Errors(errors...)
 }
 
-func (d *DefaultDialer) listenSerialInterfacePacket(ctx context.Context, listener net.ListenConfig, network string, addr string, strategy C.NetworkStrategy, interfaceType []C.InterfaceType, fallbackInterfaceType []C.InterfaceType, fallbackDelay time.Duration) (net.PacketConn, error) {
-	primaryInterfaces, fallbackInterfaces := selectInterfaces(d.networkManager, strategy, interfaceType, fallbackInterfaceType)
-	if len(primaryInterfaces)+len(fallbackInterfaces) == 0 {
-		return nil, E.New("no available network interface")
+func dialInterface(ctx context.Context, dialer net.Dialer, network string, destination M.Socksaddr, iif adapter.NetworkInterface, defaultInterface *control.Interface) (net.Conn, error) {
+	if defaultInterface == nil || iif.Index != defaultInterface.Index {
+		dialer.Control = control.Append(dialer.Control, control.BindToInterface(nil, iif.Name, iif.Index))
 	}
-	defaultInterface := d.networkManager.InterfaceMonitor().DefaultInterface()
-	var errors []error
-	for _, primaryInterface := range primaryInterfaces {
-		perNetListener := listener
-		if defaultInterface == nil || primaryInterface.Index != defaultInterface.Index {
-			perNetListener.Control = control.Append(perNetListener.Control, control.BindToInterface(nil, primaryInterface.Name, primaryInterface.Index))
-		}
-		conn, err := perNetListener.ListenPacket(ctx, network, addr)
-		if err == nil {
-			return conn, nil
-		}
-		errors = append(errors, E.Cause(err, "listen ", primaryInterface.Name, " (", primaryInterface.Index, ")"))
+	if destination.Addr.Zone() == "" && isLinkScoped(destination.Addr) {
+		destination.Addr = destination.Addr.WithZone(strconv.Itoa(iif.Index))
 	}
-	for _, fallbackInterface := range fallbackInterfaces {
-		perNetListener := listener
-		if defaultInterface == nil || fallbackInterface.Index != defaultInterface.Index {
-			perNetListener.Control = control.Append(perNetListener.Control, control.BindToInterface(nil, fallbackInterface.Name, fallbackInterface.Index))
-		}
-		conn, err := perNetListener.ListenPacket(ctx, network, addr)
-		if err == nil {
-			return conn, nil
-		}
-		errors = append(errors, E.Cause(err, "listen ", fallbackInterface.Name, " (", fallbackInterface.Index, ")"))
+	conn, err := dialer.DialContext(ctx, network, destination.String())
+	if err != nil {
+		return nil, E.Cause(err, "dial ", iif.Name, " (", iif.Index, ")")
 	}
-	return nil, E.Errors(errors...)
+	return conn, nil
+}
+
+func (d *DefaultDialer) serialInterfaceControl(strategy C.NetworkStrategy, interfaceType []C.InterfaceType, fallbackInterfaceType []C.InterfaceType) control.Func {
+	return func(network, address string, conn syscall.RawConn) error {
+		primaryInterfaces, fallbackInterfaces := selectInterfaces(d.networkManager, strategy, interfaceType, fallbackInterfaceType)
+		if len(primaryInterfaces)+len(fallbackInterfaces) == 0 {
+			return E.New("no available network interface")
+		}
+		defaultInterface := d.networkManager.InterfaceMonitor().DefaultInterface()
+		var errors []error
+		for _, networkInterfaces := range [][]adapter.NetworkInterface{primaryInterfaces, fallbackInterfaces} {
+			for _, networkInterface := range networkInterfaces {
+				if defaultInterface != nil && networkInterface.Index == defaultInterface.Index {
+					return nil
+				}
+				err := control.BindToInterface0(nil, conn, network, address, networkInterface.Name, networkInterface.Index, false)
+				if err == nil {
+					return nil
+				}
+				errors = append(errors, E.Cause(err, "bind ", networkInterface.Name, " (", networkInterface.Index, ")"))
+			}
+		}
+		return E.Errors(errors...)
+	}
 }
 
 func selectInterfaces(networkManager adapter.NetworkManager, strategy C.NetworkStrategy, interfaceType []C.InterfaceType, fallbackInterfaceType []C.InterfaceType) (primaryInterfaces []adapter.NetworkInterface, fallbackInterfaces []adapter.NetworkInterface) {
