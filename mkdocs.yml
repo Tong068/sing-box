@@ -76,6 +76,7 @@ nav:
           - Shadowsocks: manual/proxy-protocol/shadowsocks.md
           - Trojan: manual/proxy-protocol/trojan.md
           - Hysteria 2: manual/proxy-protocol/hysteria2.md
+          - Tongls: manual/proxy-protocol/tongls.md
       - Misc:
           - TunnelVision: manual/misc/tunnelvision.md
           - AnyTLS client metadata: manual/misc/anytls-client-metadata.md
@@ -176,6 +177,7 @@ nav:
           - TUIC: configuration/inbound/tuic.md
           - Hysteria2: configuration/inbound/hysteria2.md
           - AnyTLS: configuration/inbound/anytls.md
+          - Tongls: configuration/inbound/tongls.md
           - Snell: configuration/inbound/snell.md
           - Tun: configuration/inbound/tun.md
           - Redirect: configuration/inbound/redirect.md
@@ -200,6 +202,7 @@ nav:
           - TUIC: configuration/outbound/tuic.md
           - Hysteria2: configuration/outbound/hysteria2.md
           - AnyTLS: configuration/outbound/anytls.md
+          - Tongls: configuration/outbound/tongls.md
           - Snell: configuration/outbound/snell.md
           - Tailcat: configuration/outbound/tailcat.md
           - Tor: configuration/outbound/tor.md
